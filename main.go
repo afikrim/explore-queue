@@ -7,13 +7,21 @@ import (
 	"syscall"
 	"time"
 
+	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/service"
-	handler "afikrim_a.bitbucket.org/simple-go-queue/handler/api"
+	handlerApi "afikrim_a.bitbucket.org/simple-go-queue/handler/api"
+	handlerWorker "afikrim_a.bitbucket.org/simple-go-queue/handler/worker"
 	blog_repository "afikrim_a.bitbucket.org/simple-go-queue/repository/blog"
+	"github.com/gocraft/work"
+	"github.com/gomodule/redigo/redis"
 	"github.com/labstack/echo/v4"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type WorkerContext struct {
+	entity.Blog
+}
 
 func main() {
 	// init db connection using gorm
@@ -27,14 +35,51 @@ func main() {
 		panic(err)
 	}
 
+	redisPool := &redis.Pool{
+		MaxActive: 5,
+		MaxIdle:   5,
+		Wait:      true,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", ":6379")
+		},
+	}
+	enqueuer := work.NewEnqueuer("blog", redisPool)
+
+	publisherPool := &redis.Pool{
+		MaxActive: 5,
+		MaxIdle:   5,
+		Wait:      true,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", ":6379")
+		},
+	}
+	publisher := publisherPool.Get()
+
+	subscriberPool := &redis.Pool{
+		MaxActive: 5,
+		MaxIdle:   5,
+		Wait:      true,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", ":6379")
+		},
+	}
+	subscriber := subscriberPool.Get()
+
 	// init repositories
-	blogRepo := blog_repository.NewBlogRepository(db)
+	blogRepo := blog_repository.NewBlogRepository(db, publisher, subscriber, enqueuer)
 
 	// init services
 	blogService := service.NewBlogService(blogRepo)
 
 	// init handlers
-	blogHandler := handler.NewBlogHandler(blogService)
+	blogHandlerApi := handlerApi.NewBlogHandler(blogService)
+	blogHandlerWorker := handlerWorker.NewBlogHandler(blogService)
+
+	// init worker
+	workerPool := work.NewWorkerPool(WorkerContext{}, 10, "blog", redisPool)
+
+	// register jobs
+	blogHandlerWorker.RegisterHandler(workerPool)
 
 	// init echo
 	e := echo.New()
@@ -43,7 +88,7 @@ func main() {
 	apiV1 := e.Group("/api/v1")
 
 	// register handlers
-	blogHandler.RegisterHandler(apiV1)
+	blogHandlerApi.RegisterHandler(apiV1)
 
 	// start echo
 	go func() {
@@ -52,15 +97,21 @@ func main() {
 		}
 	}()
 
+	// start worker
+	go func() {
+		workerPool.Start()
+	}()
+
 	// graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	<-quit
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := e.Shutdown(ctx); err != nil {
 		panic(err)
 	}
+	workerPool.Stop()
 }

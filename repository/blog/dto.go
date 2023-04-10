@@ -1,6 +1,7 @@
 package blog_repository
 
 import (
+	"encoding/json"
 	"time"
 
 	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
@@ -44,6 +45,12 @@ func (BlogDto) FromEntity(entity *entity.Blog) *BlogDto {
 		Title: entity.Title,
 		Body:  entity.Body,
 	}
+}
+
+func (BlogDto) FromJson(jsonVal []byte) *BlogDto {
+	dto := BlogDto{}
+	json.Unmarshal(jsonVal, &dto)
+	return &dto
 }
 
 func (dto *BlogDto) InitTimestamps() *BlogDto {
