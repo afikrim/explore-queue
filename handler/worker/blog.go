@@ -35,5 +35,6 @@ func (h *blogHandler) CreateBlog(job *work.Job) error {
 }
 
 func (h *blogHandler) RegisterHandler(pool *work.WorkerPool) {
+	pool.PeriodicallyEnqueue("* * * * *", "create-blog")
 	pool.Job("create-blog", h.CreateBlog)
 }

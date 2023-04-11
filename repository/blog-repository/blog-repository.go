@@ -7,23 +7,23 @@ import (
 	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/repository"
 	"github.com/gocraft/work"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/gomodule/redigo/redis"
 	"gorm.io/gorm"
 )
 
 type blogRepository struct {
-	db         *gorm.DB
-	publisher  *goredis.Client
-	subscriber *goredis.Client
-	enqueuer   *work.Enqueuer
+	db             *gorm.DB
+	publisherPool  *redis.Pool
+	subscriberPool *redis.Pool
+	enqueuer       *work.Enqueuer
 }
 
-func NewBlogRepository(db *gorm.DB, publisher, subscriber *goredis.Client, enqueuer *work.Enqueuer) repository.BlogRepository {
+func NewBlogRepository(db *gorm.DB, publisherPool, subscriberPool *redis.Pool, enqueuer *work.Enqueuer) repository.BlogRepository {
 	return &blogRepository{
-		db:         db,
-		publisher:  publisher,
-		subscriber: subscriber,
-		enqueuer:   enqueuer,
+		db:             db,
+		publisherPool:  publisherPool,
+		subscriberPool: subscriberPool,
+		enqueuer:       enqueuer,
 	}
 }
 
@@ -50,12 +50,18 @@ func (r *blogRepository) CreateBlogEnqueue(ctx context.Context, callbackCh strin
 }
 
 func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel string, res *entity.CreateBlogResponse) error {
+	conn, err := r.publisherPool.GetContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
 	resJson, err := json.Marshal(res)
 	if err != nil {
 		return err
 	}
 
-	_, err = r.publisher.Publish(ctx, channel, resJson).Result()
+	_, err = conn.Do("PUBLISH", channel, resJson)
 	if err != nil {
 		return err
 	}
@@ -64,22 +70,31 @@ func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel 
 }
 
 func (r *blogRepository) CreateBlogSubscriber(ctx context.Context, channel string) (*entity.CreateBlogResponse, error) {
-	psc := r.subscriber.Subscribe(ctx, channel)
+	conn, err := r.subscriberPool.GetContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	psc := redis.PubSubConn{Conn: conn}
+	psc.Subscribe(channel)
 
 	for {
-		msg, err := psc.ReceiveMessage(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		if msg != nil {
+		switch v := psc.Receive().(type) {
+		case redis.Message:
 			res := &entity.CreateBlogResponse{}
-			err = json.Unmarshal([]byte(msg.Payload), res)
+			err := json.Unmarshal(v.Data, res)
 			if err != nil {
 				return nil, err
 			}
 
 			return res, nil
+		case redis.Subscription:
+			if v.Count == 0 {
+				return nil, nil
+			}
+		case error:
+			return nil, v
 		}
 	}
 }

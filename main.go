@@ -17,7 +17,6 @@ import (
 	"github.com/gocraft/work"
 	"github.com/gomodule/redigo/redis"
 	"github.com/labstack/echo/v4"
-	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -46,21 +45,27 @@ func main() {
 	}
 	enqueuer := work.NewEnqueuer("blog", redisPool)
 
-	publisher := goredis.NewClient(&goredis.Options{
-		Addr:     ":6379",
-		Password: "",
-		DB:       0,
-	})
+	publisherPool := &redis.Pool{
+		MaxActive: 25,
+		MaxIdle:   10,
+		Wait:      true,
+		DialContext: func(ctx context.Context) (redis.Conn, error) {
+			return redis.DialContext(ctx, "tcp", ":6379", redis.DialDatabase(0))
+		},
+	}
 
-	subscriber := goredis.NewClient(&goredis.Options{
-		Addr:     ":6379",
-		Password: "",
-		DB:       0,
-	})
+	subscriberPool := &redis.Pool{
+		MaxActive: 25,
+		MaxIdle:   10,
+		Wait:      true,
+		DialContext: func(ctx context.Context) (redis.Conn, error) {
+			return redis.DialContext(ctx, "tcp", ":6379", redis.DialDatabase(0))
+		},
+	}
 
 	// init repositories
-	blogRepo := blogrepository.NewBlogRepository(db, publisher, subscriber, enqueuer)
-	pingRepo := pingrepository.NewPingRepository(publisher, subscriber, enqueuer)
+	blogRepo := blogrepository.NewBlogRepository(db, publisherPool, subscriberPool, enqueuer)
+	pingRepo := pingrepository.NewPingRepository(publisherPool, subscriberPool, enqueuer)
 
 	// init services
 	blogService := service.NewBlogService(blogRepo)

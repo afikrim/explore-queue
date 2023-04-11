@@ -30,5 +30,6 @@ func (h *pingHandler) Ping(job *work.Job) error {
 }
 
 func (h *pingHandler) RegisterHandler(pool *work.WorkerPool) {
-	pool.Job("ping", h.Ping)
+	pool.PeriodicallyEnqueue("* * * * *", "ping")
+	pool.JobWithOptions("ping", work.JobOptions{MaxFails: 1, MaxConcurrency: 10}, h.Ping)
 }

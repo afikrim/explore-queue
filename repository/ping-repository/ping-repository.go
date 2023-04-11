@@ -7,20 +7,20 @@ import (
 	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/repository"
 	"github.com/gocraft/work"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/gomodule/redigo/redis"
 )
 
 type pingRepository struct {
-	publisher  *goredis.Client
-	subscriber *goredis.Client
-	enqueuer   *work.Enqueuer
+	publisherPool  *redis.Pool
+	subscriberPool *redis.Pool
+	enqueuer       *work.Enqueuer
 }
 
-func NewPingRepository(publisher, subscriber *goredis.Client, enqueuer *work.Enqueuer) repository.PingRepository {
+func NewPingRepository(publisherPool, subscriberPool *redis.Pool, enqueuer *work.Enqueuer) repository.PingRepository {
 	return &pingRepository{
-		publisher:  publisher,
-		subscriber: subscriber,
-		enqueuer:   enqueuer,
+		publisherPool:  publisherPool,
+		subscriberPool: subscriberPool,
+		enqueuer:       enqueuer,
 	}
 }
 
@@ -34,33 +34,48 @@ func (r *pingRepository) PingEnqueue(ctx context.Context, callbackCh string) err
 }
 
 func (r *pingRepository) PingSubscriber(ctx context.Context, channel string) (*entity.PingResponse, error) {
-	psc := r.subscriber.Subscribe(ctx, channel)
+	conn, err := r.subscriberPool.GetContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	psc := redis.PubSubConn{Conn: conn}
+	psc.Subscribe(channel)
 
 	for {
-		msg, err := psc.ReceiveMessage(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		if msg != nil {
-			res := &entity.PingResponse{}
-			err = json.Unmarshal([]byte(msg.Payload), &res)
+		switch v := psc.Receive().(type) {
+		case redis.Message:
+			var res entity.PingResponse
+			err := json.Unmarshal(v.Data, &res)
 			if err != nil {
 				return nil, err
 			}
 
-			return res, nil
+			return &res, nil
+		case redis.Subscription:
+			if v.Count == 0 {
+				return nil, nil
+			}
+		case error:
+			return nil, v
 		}
 	}
 }
 
 func (r *pingRepository) PingResponsePublish(ctx context.Context, channel string, res *entity.PingResponse) error {
+	conn, err := r.publisherPool.GetContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
 	resJson, err := json.Marshal(res)
 	if err != nil {
 		return err
 	}
 
-	_, err = r.publisher.Publish(ctx, channel, resJson).Result()
+	_, err = conn.Do("PUBLISH", channel, resJson)
 	if err != nil {
 		return err
 	}
