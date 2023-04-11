@@ -1,4 +1,4 @@
-package blog_repository
+package blogrepository
 
 import (
 	"context"

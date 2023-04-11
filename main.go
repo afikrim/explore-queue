@@ -11,7 +11,8 @@ import (
 	"afikrim_a.bitbucket.org/simple-go-queue/core/service"
 	handlerApi "afikrim_a.bitbucket.org/simple-go-queue/handler/api"
 	handlerWorker "afikrim_a.bitbucket.org/simple-go-queue/handler/worker"
-	blog_repository "afikrim_a.bitbucket.org/simple-go-queue/repository/blog"
+	blogrepository "afikrim_a.bitbucket.org/simple-go-queue/repository/blog-repository"
+	pingrepository "afikrim_a.bitbucket.org/simple-go-queue/repository/ping-repository"
 	"github.com/gocraft/work"
 	"github.com/gomodule/redigo/redis"
 	"github.com/labstack/echo/v4"
@@ -31,7 +32,7 @@ func main() {
 	}
 
 	// init db schema
-	if err := db.AutoMigrate(&blog_repository.BlogDto{}); err != nil {
+	if err := db.AutoMigrate(&blogrepository.BlogDto{}); err != nil {
 		panic(err)
 	}
 
@@ -66,20 +67,26 @@ func main() {
 	subscriber := subscriberPool.Get()
 
 	// init repositories
-	blogRepo := blog_repository.NewBlogRepository(db, publisher, subscriber, enqueuer)
+	blogRepo := blogrepository.NewBlogRepository(db, publisher, subscriber, enqueuer)
+	pingRepo := pingrepository.NewPingRepository(publisher, subscriber, enqueuer)
 
 	// init services
 	blogService := service.NewBlogService(blogRepo)
+	pingService := service.NewPingService(pingRepo)
 
 	// init handlers
 	blogHandlerApi := handlerApi.NewBlogHandler(blogService)
+	pingHandlerApi := handlerApi.NewPingHandler(pingService)
+
 	blogHandlerWorker := handlerWorker.NewBlogHandler(blogService)
+	pingHandlerWorker := handlerWorker.NewPingHandler(pingService)
 
 	// init worker
 	workerPool := work.NewWorkerPool(WorkerContext{}, 10, "blog", redisPool)
 
 	// register jobs
 	blogHandlerWorker.RegisterHandler(workerPool)
+	pingHandlerWorker.RegisterHandler(workerPool)
 
 	// init echo
 	e := echo.New()
@@ -89,6 +96,7 @@ func main() {
 
 	// register handlers
 	blogHandlerApi.RegisterHandler(apiV1)
+	pingHandlerApi.RegisterHandler(apiV1)
 
 	// start echo
 	go func() {
