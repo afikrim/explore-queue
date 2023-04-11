@@ -6,24 +6,24 @@ import (
 
 	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/repository"
-	"github.com/gocraft/work"
-	"github.com/gomodule/redigo/redis"
+	"github.com/adjust/rmq/v5"
+	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 )
 
 type blogRepository struct {
-	db             *gorm.DB
-	publisherPool  *redis.Pool
-	subscriberPool *redis.Pool
-	enqueuer       *work.Enqueuer
+	db               *gorm.DB
+	publisherClient  *redis.Client
+	subscriberClient *redis.Client
+	queue            rmq.Queue
 }
 
-func NewBlogRepository(db *gorm.DB, publisherPool, subscriberPool *redis.Pool, enqueuer *work.Enqueuer) repository.BlogRepository {
+func NewBlogRepository(db *gorm.DB, publisherClient, subscriberClient *redis.Client, queue rmq.Queue) repository.BlogRepository {
 	return &blogRepository{
-		db:             db,
-		publisherPool:  publisherPool,
-		subscriberPool: subscriberPool,
-		enqueuer:       enqueuer,
+		db:               db,
+		publisherClient:  publisherClient,
+		subscriberClient: subscriberClient,
+		queue:            queue,
 	}
 }
 
@@ -41,8 +41,12 @@ func (r *blogRepository) CreateBlog(ctx context.Context, blog *entity.Blog) (int
 }
 
 func (r *blogRepository) CreateBlogEnqueue(ctx context.Context, callbackCh string, req *entity.Blog) error {
-	_, err := r.enqueuer.Enqueue("create-blog", work.Q{"title": req.Title, "body": req.Body, "callback_ch": callbackCh})
+	rawMsg, err := json.Marshal(&map[string]interface{}{"title": req.Title, "body": req.Body, "callback_ch": callbackCh})
 	if err != nil {
+		return err
+	}
+
+	if err := r.queue.Publish(string(rawMsg)); err != nil {
 		return err
 	}
 
@@ -50,18 +54,12 @@ func (r *blogRepository) CreateBlogEnqueue(ctx context.Context, callbackCh strin
 }
 
 func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel string, res *entity.CreateBlogResponse) error {
-	conn, err := r.publisherPool.GetContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
 	resJson, err := json.Marshal(res)
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.Do("PUBLISH", channel, resJson)
+	_, err = r.publisherClient.Publish(ctx, channel, resJson).Result()
 	if err != nil {
 		return err
 	}
@@ -70,31 +68,23 @@ func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel 
 }
 
 func (r *blogRepository) CreateBlogSubscriber(ctx context.Context, channel string) (*entity.CreateBlogResponse, error) {
-	conn, err := r.subscriberPool.GetContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	psc := redis.PubSubConn{Conn: conn}
-	psc.Subscribe(channel)
+	psc := r.subscriberClient.Subscribe(ctx, channel)
+	defer psc.Close()
 
 	for {
-		switch v := psc.Receive().(type) {
-		case redis.Message:
+		msg, err := psc.ReceiveMessage(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		if msg != nil {
 			res := &entity.CreateBlogResponse{}
-			err := json.Unmarshal(v.Data, res)
+			err = json.Unmarshal([]byte(msg.Payload), res)
 			if err != nil {
 				return nil, err
 			}
 
 			return res, nil
-		case redis.Subscription:
-			if v.Count == 0 {
-				return nil, nil
-			}
-		case error:
-			return nil, v
 		}
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,8 +15,8 @@ import (
 	handlerWorker "afikrim_a.bitbucket.org/simple-go-queue/handler/worker"
 	blogrepository "afikrim_a.bitbucket.org/simple-go-queue/repository/blog-repository"
 	pingrepository "afikrim_a.bitbucket.org/simple-go-queue/repository/ping-repository"
-	"github.com/gocraft/work"
-	"github.com/gomodule/redigo/redis"
+	"github.com/adjust/rmq/v5"
+	"github.com/go-redis/redis/v8"
 	"github.com/labstack/echo/v4"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -35,37 +36,43 @@ func main() {
 		panic(err)
 	}
 
-	redisPool := &redis.Pool{
-		MaxActive: 25,
-		MaxIdle:   10,
-		Wait:      true,
-		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", ":6379")
-		},
-	}
-	enqueuer := work.NewEnqueuer("blog", redisPool)
+	errChan := make(chan error, 10)
+	go logErrors(errChan)
 
-	publisherPool := &redis.Pool{
-		MaxActive: 25,
-		MaxIdle:   10,
-		Wait:      true,
-		DialContext: func(ctx context.Context) (redis.Conn, error) {
-			return redis.DialContext(ctx, "tcp", ":6379", redis.DialDatabase(0))
-		},
+	workerClient := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+	publisherClient := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+	subscriberClient := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	// init queue
+	queueConn, err := rmq.OpenConnectionWithRedisClient("blog", workerClient, errChan)
+	if err != nil {
+		panic(err)
 	}
 
-	subscriberPool := &redis.Pool{
-		MaxActive: 25,
-		MaxIdle:   10,
-		Wait:      true,
-		DialContext: func(ctx context.Context) (redis.Conn, error) {
-			return redis.DialContext(ctx, "tcp", ":6379", redis.DialDatabase(0))
-		},
+	blogQueue, err := queueConn.OpenQueue("blog")
+	if err != nil {
+		panic(err)
+	}
+	pingQueue, err := queueConn.OpenQueue("ping")
+	if err != nil {
+		panic(err)
 	}
 
 	// init repositories
-	blogRepo := blogrepository.NewBlogRepository(db, publisherPool, subscriberPool, enqueuer)
-	pingRepo := pingrepository.NewPingRepository(publisherPool, subscriberPool, enqueuer)
+	blogRepo := blogrepository.NewBlogRepository(db, publisherClient, subscriberClient, blogQueue)
+	pingRepo := pingrepository.NewPingRepository(publisherClient, subscriberClient, pingQueue)
 
 	// init services
 	blogService := service.NewBlogService(blogRepo)
@@ -75,15 +82,12 @@ func main() {
 	blogHandlerApi := handlerApi.NewBlogHandler(blogService)
 	pingHandlerApi := handlerApi.NewPingHandler(pingService)
 
-	blogHandlerWorker := handlerWorker.NewBlogHandler(blogService)
+	createBlogHandlerWorker := handlerWorker.NewCreateBlogHandler(blogService)
 	pingHandlerWorker := handlerWorker.NewPingHandler(pingService)
 
-	// init worker
-	workerPool := work.NewWorkerPool(WorkerContext{}, 10, "blog", redisPool)
-
-	// register jobs
-	blogHandlerWorker.RegisterHandler(workerPool)
-	pingHandlerWorker.RegisterHandler(workerPool)
+	// init consumer
+	createBlogHandlerWorker.RegisterHandler(blogQueue)
+	pingHandlerWorker.RegisterHandler(pingQueue)
 
 	// init echo
 	e := echo.New()
@@ -102,11 +106,6 @@ func main() {
 		}
 	}()
 
-	// start worker
-	go func() {
-		workerPool.Start()
-	}()
-
 	// graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -118,5 +117,23 @@ func main() {
 	if err := e.Shutdown(ctx); err != nil {
 		panic(err)
 	}
-	workerPool.Stop()
+}
+
+func logErrors(errChan <-chan error) {
+	for err := range errChan {
+		switch err := err.(type) {
+		case *rmq.HeartbeatError:
+			if err.Count == rmq.HeartbeatErrorLimit {
+				log.Print("heartbeat error (limit): ", err)
+			} else {
+				log.Print("heartbeat error: ", err)
+			}
+		case *rmq.ConsumeError:
+			log.Print("consume error: ", err)
+		case *rmq.DeliveryError:
+			log.Print("delivery error: ", err.Delivery, err)
+		default:
+			log.Print("other error: ", err)
+		}
+	}
 }

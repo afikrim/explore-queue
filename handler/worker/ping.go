@@ -2,15 +2,18 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"time"
 
+	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/service"
-	"github.com/gocraft/work"
+	"github.com/adjust/rmq/v5"
 )
 
 type PingHandler interface {
-	Ping(job *work.Job) error
+	Consume(delivery rmq.Delivery)
 
-	RegisterHandler(pool *work.WorkerPool)
+	RegisterHandler(queue rmq.Queue)
 }
 
 type pingHandler struct {
@@ -23,13 +26,27 @@ func NewPingHandler(pingSvc service.PingService) PingHandler {
 	}
 }
 
-func (h *pingHandler) Ping(job *work.Job) error {
-	callbackCh := job.ArgString("callback_ch")
+func (h *pingHandler) Consume(delivery rmq.Delivery) {
+	req := &entity.PingRequestQueue{}
+	err := json.Unmarshal([]byte(delivery.Payload()), req)
+	if err != nil {
+		delivery.Reject()
+		return
+	}
 
-	return h.pingSvc.PingWorker(context.Background(), callbackCh)
+	err = h.pingSvc.PingWorker(context.Background(), req.CallbackCh)
+	if err != nil {
+		delivery.Reject()
+		return
+	}
+
+	delivery.Ack()
 }
 
-func (h *pingHandler) RegisterHandler(pool *work.WorkerPool) {
-	pool.PeriodicallyEnqueue("* * * * *", "ping")
-	pool.JobWithOptions("ping", work.JobOptions{MaxFails: 1, MaxConcurrency: 10}, h.Ping)
+func (h *pingHandler) RegisterHandler(queue rmq.Queue) {
+	queue.StartConsuming(50, 1*time.Second)
+
+	for i := 0; i < 10; i++ {
+		queue.AddConsumer("ping", h)
+	}
 }

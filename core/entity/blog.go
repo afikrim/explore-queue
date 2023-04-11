@@ -18,6 +18,12 @@ type CreateBlogRequest struct {
 	Body  string `json:"body"`
 }
 
+type CreateBlogRequestQueue struct {
+	CreateBlogRequest
+
+	CallbackCh string `json:"callback_ch"`
+}
+
 type CreateBlogResponse struct {
 	ID int64 `json:"id"`
 }
