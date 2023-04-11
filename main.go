@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/service"
 	handlerApi "afikrim_a.bitbucket.org/simple-go-queue/handler/api"
 	handlerWorker "afikrim_a.bitbucket.org/simple-go-queue/handler/worker"
@@ -16,13 +17,12 @@ import (
 	"github.com/gocraft/work"
 	"github.com/gomodule/redigo/redis"
 	"github.com/labstack/echo/v4"
+	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-type WorkerContext struct {
-	entity.Blog
-}
+type WorkerContext struct{}
 
 func main() {
 	// init db connection using gorm
@@ -37,8 +37,8 @@ func main() {
 	}
 
 	redisPool := &redis.Pool{
-		MaxActive: 5,
-		MaxIdle:   5,
+		MaxActive: 25,
+		MaxIdle:   10,
 		Wait:      true,
 		Dial: func() (redis.Conn, error) {
 			return redis.Dial("tcp", ":6379")
@@ -46,25 +46,17 @@ func main() {
 	}
 	enqueuer := work.NewEnqueuer("blog", redisPool)
 
-	publisherPool := &redis.Pool{
-		MaxActive: 5,
-		MaxIdle:   5,
-		Wait:      true,
-		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", ":6379")
-		},
-	}
-	publisher := publisherPool.Get()
+	publisher := goredis.NewClient(&goredis.Options{
+		Addr:     ":6379",
+		Password: "",
+		DB:       0,
+	})
 
-	subscriberPool := &redis.Pool{
-		MaxActive: 5,
-		MaxIdle:   5,
-		Wait:      true,
-		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", ":6379")
-		},
-	}
-	subscriber := subscriberPool.Get()
+	subscriber := goredis.NewClient(&goredis.Options{
+		Addr:     ":6379",
+		Password: "",
+		DB:       0,
+	})
 
 	// init repositories
 	blogRepo := blogrepository.NewBlogRepository(db, publisher, subscriber, enqueuer)
@@ -100,7 +92,7 @@ func main() {
 
 	// start echo
 	go func() {
-		if err := e.Start(":8080"); err != nil {
+		if err := e.Start(":8080"); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			panic(err)
 		}
 	}()

@@ -7,18 +7,18 @@ import (
 	"afikrim_a.bitbucket.org/simple-go-queue/core/entity"
 	"afikrim_a.bitbucket.org/simple-go-queue/core/repository"
 	"github.com/gocraft/work"
-	"github.com/gomodule/redigo/redis"
+	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
 type blogRepository struct {
 	db         *gorm.DB
-	publisher  redis.Conn
-	subscriber redis.Conn
+	publisher  *goredis.Client
+	subscriber *goredis.Client
 	enqueuer   *work.Enqueuer
 }
 
-func NewBlogRepository(db *gorm.DB, publisher, subscriber redis.Conn, enqueuer *work.Enqueuer) repository.BlogRepository {
+func NewBlogRepository(db *gorm.DB, publisher, subscriber *goredis.Client, enqueuer *work.Enqueuer) repository.BlogRepository {
 	return &blogRepository{
 		db:         db,
 		publisher:  publisher,
@@ -55,7 +55,7 @@ func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel 
 		return err
 	}
 
-	_, err = r.publisher.Do("PUBLISH", channel, resJson)
+	_, err = r.publisher.Publish(ctx, channel, resJson).Result()
 	if err != nil {
 		return err
 	}
@@ -64,25 +64,22 @@ func (r *blogRepository) CreateBlogResponsePublish(ctx context.Context, channel 
 }
 
 func (r *blogRepository) CreateBlogSubscriber(ctx context.Context, channel string) (*entity.CreateBlogResponse, error) {
-	psc := redis.PubSubConn{Conn: r.subscriber}
-	psc.Subscribe(channel)
+	psc := r.subscriber.Subscribe(ctx, channel)
 
 	for {
-		switch v := psc.Receive().(type) {
-		case redis.Message:
+		msg, err := psc.ReceiveMessage(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		if msg != nil {
 			res := &entity.CreateBlogResponse{}
-			err := json.Unmarshal(v.Data, res)
+			err = json.Unmarshal([]byte(msg.Payload), res)
 			if err != nil {
 				return nil, err
 			}
 
 			return res, nil
-		case redis.Subscription:
-			if v.Count == 0 {
-				return nil, nil
-			}
-		case error:
-			return nil, v
 		}
 	}
 }
